@@ -10,6 +10,10 @@ import (
 	"syscall"
 )
 
+var fnCmd *exec.Cmd = nil
+var launcherCmd *exec.Cmd = nil
+var eacCmd *exec.Cmd = nil
+
 func main() {
 	args := os.Args
 	if len(args) != 3 {
@@ -24,14 +28,14 @@ func main() {
 		return
 	}
 
-	suspend(fnPath + "\\FortniteGame\\Binaries\\Win64\\FortniteLauncher.exe")
-	suspend(fnPath + "\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping_EAC.exe")
+	launcherCmd = suspend(fnPath + "\\FortniteGame\\Binaries\\Win64\\FortniteLauncher.exe")
+	eacCmd = suspend(fnPath + "\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping_EAC.exe")
 	launchFN(fnPath, username)
 }
 
 func launchFN(path string, username string) {
 	username = username + "@vanguard.dev"
-	cmd := exec.Command(
+	fnCmd = exec.Command(
 		path+"\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping.exe",
 		"-epicapp=Fortnite",
 		"-epicenv=Prod",
@@ -46,23 +50,26 @@ func launchFN(path string, username string) {
 		"-AUTH_PASSWORD=Vanguard",
 		"-AUTH_TYPE=epic",
 	)
-	err := cmd.Start()
+	err := fnCmd.Start()
 	if err != nil {
-		log.Fatalln("Unable to start Fortnite:\n", err)
+		log.Println("Unable to start Fortnite:\n", err)
+		shutdown()
 	}
 
-	injectCobalt(uint32(cmd.Process.Pid), cmd)
+	injectCobalt(uint32(fnCmd.Process.Pid))
 
-	err = cmd.Wait()
+	err = fnCmd.Wait()
 	if err != nil {
 		log.Println("Fortnite closed with a non-zero exit code:\n", err)
 	}
+	shutdown()
 }
 
-func injectCobalt(pid uint32, cmd *exec.Cmd) {
+func injectCobalt(pid uint32) {
 	workingDir, err := os.Getwd()
 	if err != nil {
-		log.Fatalln(err)
+		log.Println(err)
+		shutdown()
 	}
 
 	cobaltPath := filepath.Join(workingDir, "Cobalt.dll")
@@ -70,11 +77,11 @@ func injectCobalt(pid uint32, cmd *exec.Cmd) {
 	_, err = os.Stat(cobaltPath)
 
 	if err != nil && os.IsNotExist(err) {
-		shutdownFortnite(cmd)
-		log.Fatalln("Cobalt.dll was not found in the working directory:\n", err)
+		log.Println("Cobalt.dll was not found in the working directory:\n", err)
+		shutdown()
 	} else if err != nil {
-		shutdownFortnite(cmd)
-		log.Fatalln("Error checking Cobalt.dll:\n", err)
+		log.Println("Error checking Cobalt.dll:\n", err)
+		shutdown()
 	}
 
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
@@ -85,7 +92,8 @@ func injectCobalt(pid uint32, cmd *exec.Cmd) {
 		pid,
 	)
 	if err != nil {
-		log.Fatalln("Unable to open Fortnite process:\n", err)
+		log.Println("Unable to open Fortnite process:\n", err)
+		shutdown()
 	}
 
 	VirtualAllocEx := kernel32.NewProc("VirtualAllocEx")
@@ -96,35 +104,42 @@ func injectCobalt(pid uint32, cmd *exec.Cmd) {
 		windows.MEM_RESERVE|windows.MEM_COMMIT, windows.PAGE_EXECUTE_READWRITE)
 	bPtr, err := windows.BytePtrFromString(cobaltPath)
 	if err != nil {
-		shutdownFortnite(cmd)
-		log.Fatalln("Unable to allocate memory for Cobalt:\n", err)
+		log.Println("Unable to allocate memory for Cobalt:\n", err)
+		shutdown()
 	}
 
 	zero := uintptr(0)
 	err = windows.WriteProcessMemory(handle, alloc, bPtr, uintptr(len(cobaltPath)+1), &zero)
 	if err != nil {
-		shutdownFortnite(cmd)
-		log.Fatalln("Unable to write Fortnite process memory:\n", err)
+		log.Println("Unable to write Fortnite process memory:\n", err)
+		shutdown()
 	}
 
 	LoadLibAddr, err := syscall.GetProcAddress(syscall.Handle(kernel32.Handle()), "LoadLibraryA")
 	if err != nil {
-		shutdownFortnite(cmd)
-		log.Fatal("Unable to load Cobalt into memory:\n", err)
+		log.Println("Unable to load Cobalt into memory:\n", err)
+		shutdown()
 	}
 
 	tHandle, _, _ := kernel32.NewProc("CreateRemoteThread").Call(uintptr(handle), 0, 0, LoadLibAddr, alloc, 0, 0)
 	defer syscall.CloseHandle(syscall.Handle(tHandle))
 }
 
-func shutdownFortnite(cmd *exec.Cmd) {
-	err := cmd.Process.Kill()
-	if err != nil {
-		log.Println("Unable to kill Fortnite process! Is it running?\n", err)
+func shutdown() {
+	if fnCmd != nil {
+		defer fnCmd.Process.Kill()
+	}
+
+	if launcherCmd != nil {
+		defer launcherCmd.Process.Kill()
+	}
+
+	if eacCmd != nil {
+		defer eacCmd.Process.Kill()
 	}
 }
 
-func suspend(path string) {
+func suspend(path string) *exec.Cmd {
 	cmd := exec.Command(path)
 	err := cmd.Start()
 	if err != nil {
@@ -144,4 +159,5 @@ func suspend(path string) {
 	if result != 0 {
 		log.Fatalf("Unable to suspend process %d\n", cmd.Process.Pid)
 	}
+	return cmd
 }
